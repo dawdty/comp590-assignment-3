@@ -1,0 +1,965 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="robots" content="noindex">
+    <title>Animated Hierarchical Car - Game Engine</title>
+  </head>
+
+  <body>
+    <canvas id="myCanvas" width="800" height="400"></canvas>
+    <p style="font-family: sans-serif;">Controls: Arrow keys / A &amp; D to move the man, Up / W to walk faster, Down / S to walk slower, Space to shoot birds.</p>
+
+    <script>
+      "use strict";
+
+      let canvas;
+      let context;
+
+      let carX = 100;
+      let carY = 260;
+      let manX = 50;
+      let manY = 300;
+      let bellX = 530;
+      let treesX = 0;
+      let trees2X = -80;
+      let legSwing = 0;
+      let legSwing2 = Math.PI;
+      let carSpeed = 5;
+      let wheelRotation = 0;
+      let manLegSpeed = 0.12;
+      let manMoveSpeed = 5;
+      let manVerticalSpeed = 4;
+      let manIsMoving = false;
+
+      // Previous-state values used for interpolated rendering.
+      // Each frame we render an intermediate position between the
+      // last fixed update and the next one, smoothing out stutter.
+      let prevCarX = carX;
+      let prevManX = manX;
+      let prevManY = manY;
+      let prevBellX = bellX;
+      let prevLegSwing = legSwing;
+      let prevLegSwing2 = legSwing2;
+      let prevWheelRotation = wheelRotation;
+
+      // Input state (Part 1: event-driven user interaction)
+      const input = {
+        left: false,
+        right: false,
+        up: false,
+        down: false,
+        fire: false
+      };
+      
+      let rainDrops = [];
+
+  for (let i = 0; i < 120; i++) {
+    rainDrops.push({
+      x: Math.random() * 800,
+      y: Math.random() * 400,
+      speed: 5 + Math.random() * 5,
+      length: 8 + Math.random() * 10,
+      prevX: 0,
+      prevY: 0,
+      seed: (i * 9301 + 49297) % 233280 // deterministic respawn seed
+    });
+  }
+  // Initialize the rain's previous-state values.
+  for (let drop of rainDrops) {
+    drop.prevX = drop.x;
+    drop.prevY = drop.y;
+  }
+
+      // Birds that fly toward the stickman, and bullets he shoots at them.
+      let birds = [];
+      let bullets = [];
+      let killCount = 0;
+      let manFacing = 1; // 1 = right, -1 = left
+      let birdSpawnTimer = 60; // frames until the first bird appears
+      let shotCooldown = 0; // frames until the man can shoot again
+      let health = 100; // the man's health
+      let carHitCooldown = 0; // frames until the car can hurt him again
+      let damageFlash = 0; // red screen flash opacity (0 to 0.8)
+      let gameOver = false; // true once health reaches 0
+
+      // Deterministic pseudo-random number generator (LCG). Returns a
+      // value in [0, 1) based on the given seed, and advances the seed.
+      // This keeps the rain respawning deterministically, unlike Math.random().
+      function nextRandom(state) {
+        state.seed = (state.seed * 9301 + 49297) % 233280;
+        return state.seed / 233280;
+      }
+
+      // ---- Fixed timestep constants (Part 2) ----
+      // The simulation advances in fixed 1/60s steps, so behavior is
+      // identical no matter what the actual display frame rate is.
+      const STEP = 1000 / 60; // 16.666... ms per fixed update
+      const MAX_ACCUMULATOR = STEP * 5; // prevent spiral of death
+
+      let lastTime = 0;
+      let accumulator = 0;
+
+      // FPS counter (for debugging/optimization)
+      let fps = 0;
+      let framesThisSecond = 0;
+
+      window.onload = function () {
+        canvas = document.getElementById("myCanvas");
+        context = canvas.getContext("2d");
+
+        // Part 1: register event listeners (event-driven programming)
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+
+        // Update and reset the FPS counter every second.
+        setInterval(function () {
+          fps = framesThisSecond;
+          framesThisSecond = 0;
+        }, 1000);
+
+        lastTime = performance.now();
+        requestAnimationFrame(mainLoop);
+      };
+
+      function onKeyDown(e) {
+        switch (e.key.toLowerCase()) {
+          case "arrowleft":
+          case "a":
+            input.left = true;
+            break;
+          case "arrowright":
+          case "d":
+            input.right = true;
+            break;
+          case "arrowup":
+          case "w":
+            input.up = true;
+            break;
+          case "arrowdown":
+          case "s":
+            input.down = true;
+            break;
+          case " ":
+            input.fire = true;
+            break;
+          case "r":
+            restartGame();
+            break;
+        }
+        e.preventDefault();
+      }
+
+      function onKeyUp(e) {
+        switch (e.key.toLowerCase()) {
+          case "arrowleft":
+          case "a":
+            input.left = false;
+            break;
+          case "arrowright":
+          case "d":
+            input.right = false;
+            break;
+          case "arrowup":
+          case "w":
+            input.up = false;
+            break;
+          case "arrowdown":
+          case "s":
+            input.down = false;
+            break;
+          case " ":
+            input.fire = false;
+            break;
+        }
+      }
+
+      // Resets the game state so the player can try again.
+      function restartGame() {
+        health = 100;
+        gameOver = false;
+        killCount = 0;
+        damageFlash = 0;
+        birds = [];
+        bullets = [];
+        manX = 50;
+        manY = 300;
+        manFacing = 1;
+        manMoveSpeed = 5;
+        manVerticalSpeed = 4;
+        manIsMoving = false;
+        legSwing = 0;
+        legSwing2 = Math.PI;
+        shotCooldown = 0;
+        carHitCooldown = 0;
+        birdSpawnTimer = 60;
+        carX = 100;
+        wheelRotation = 0;
+
+        // Sync previous-state values so there is no interpolation jump.
+        prevCarX = carX;
+        prevManX = manX;
+        prevManY = manY;
+        prevLegSwing = legSwing;
+        prevLegSwing2 = legSwing2;
+        prevWheelRotation = wheelRotation;
+      }
+
+      // Fixed-time step, variable rendering game loop.
+      function mainLoop(now) {
+        const delta = Math.min(now - lastTime, MAX_ACCUMULATOR);
+        lastTime = now;
+        accumulator += delta;
+
+        // Snapshot the state BEFORE any updates run this frame, so it
+        // represents the state right after the previous frame's updates.
+        snapshotPreviousState();
+
+        // Apply as many fixed update steps as have accumulated.
+        while (accumulator >= STEP) {
+          processInput();
+          update(STEP);
+          accumulator -= STEP;
+        }
+
+        // Interpolation factor: how far between the last fixed update
+        // and the next one we are (matches the article's draw(delta/timestep)).
+        const alpha = accumulator / STEP;
+
+        // Render once per display frame (variable rendering).
+        draw(alpha);
+
+        requestAnimationFrame(mainLoop);
+      }
+
+      // Saves each mutable position so draw() can interpolate. Called
+      // once per frame before the fixed update steps begin.
+      function snapshotPreviousState() {
+        prevCarX = carX;
+        prevManX = manX;
+        prevManY = manY;
+        prevBellX = bellX;
+        prevLegSwing = legSwing;
+        prevLegSwing2 = legSwing2;
+        prevWheelRotation = wheelRotation;
+        for (let drop of rainDrops) {
+          drop.prevX = drop.x;
+          drop.prevY = drop.y;
+        }
+        for (let bird of birds) {
+          bird.prevX = bird.x;
+          bird.prevY = bird.y;
+        }
+        for (let bullet of bullets) {
+          bullet.prevX = bullet.x;
+          bullet.prevY = bullet.y;
+        }
+      }
+
+      // Linear interpolation between two values by fraction t (0..1).
+      function lerp(a, b, t) {
+        return a + (b - a) * t;
+      }
+
+      // Interpolate between two values, but if the distance between them
+      // is large (a teleport/wrap happened), snap to the target instead.
+      // This prevents objects visibly sliding across the screen when they
+      // wrap from one edge to the other.
+      function lerpWithWrapSnap(prev, curr, t, snapThreshold) {
+        if (Math.abs(curr - prev) > snapThreshold) {
+          return curr; // teleport detected: don't interpolate
+        }
+        return lerp(prev, curr, t);
+      }
+
+      // Reads input state and translates it into the model (MVC: controller).
+      function processInput() {
+        // Freeze all movement/shooting while the game is over.
+        if (gameOver) return;
+
+        // Horizontal steering controls the man directly, and sets the
+        // direction he faces (used for shooting and foot direction).
+        const moving = input.left || input.right;
+
+        if (input.left)  { manX -= manMoveSpeed; manFacing = -1; }
+        if (input.right) { manX += manMoveSpeed; manFacing = 1; }
+
+        // Up / W and Down / S move the man up and down so he can dodge
+        // the car or drop back down to the road.
+        if (input.up)   manY -= manVerticalSpeed;
+        if (input.down) manY += manVerticalSpeed;
+
+        // Keep the man on screen (he can fly up to dodge, but not below
+        // the road).
+        manY = Math.max(120, Math.min(300, manY));
+
+        // Shooting: fire a bullet whenever the fire key is held and the
+        // cooldown has elapsed (the cooldown itself is decremented in update()).
+        if (input.fire && shotCooldown <= 0) {
+          const bulletX = manX + manFacing * 25;
+          const bulletY = manY - 30;
+          bullets.push({
+            x: bulletX,
+            y: bulletY,
+            dir: manFacing,
+            prevX: bulletX,
+            prevY: bulletY,
+            alive: true
+          });
+          shotCooldown = 14;
+        }
+
+        // Record whether the man is moving this step (for leg animation).
+        manIsMoving = moving || input.up || input.down;
+      }
+
+      // All simulation logic runs on a fixed timestep (deterministic).
+      function update(step) {
+        // step is in ms; convert to a scale factor relative to 60fps
+        const dt = step / (1000 / 60);
+
+        // Decay the red damage flash exponentially (fades within ~0.4s),
+        // even while the game is over.
+        if (damageFlash > 0) {
+          damageFlash *= Math.exp(-dt / 6);
+          if (damageFlash < 0.01) damageFlash = 0;
+        }
+
+        // Freeze all gameplay once the game is over.
+        if (gameOver) return;
+
+        carX -= carSpeed * dt;
+
+        wheelRotation -= 0.08 * dt;
+        if (manIsMoving) {
+          legSwing += manLegSpeed * dt;
+          legSwing2 += manLegSpeed * dt;
+        }
+        treesX -= 2 * dt;
+        trees2X -= 1 * dt;
+        bellX -= 1.2 * dt;
+
+        if (carX < -200) {
+          carX = canvas.width + 200;
+        }
+        if (manX > canvas.width + 30) {
+          manX = -30;
+        }
+        if (manX < -30) {
+          manX = canvas.width + 30;
+        }
+        if (treesX <= -180) {
+          treesX += 180;
+        }
+        if (trees2X <= -180) {
+          trees2X += 180;
+        }
+        if (bellX <= -100) {
+          bellX = canvas.width + 100;
+        }
+
+        // Move the rain as part of the deterministic simulation.
+        for (let drop of rainDrops) {
+          drop.y += drop.speed * dt;
+          drop.x -= 1.5 * dt;
+          if (drop.y > canvas.height) {
+            drop.y = -drop.length;
+            drop.x = nextRandom(drop) * canvas.width;
+          }
+        }
+
+        // Decrease the shot cooldown toward zero.
+        if (shotCooldown > 0) shotCooldown -= dt;
+        if (carHitCooldown > 0) carHitCooldown -= dt;
+
+        // Spawn birds on a timer. They appear off either edge and fly
+        // toward the stickman from both directions.
+        birdSpawnTimer -= dt;
+        if (birdSpawnTimer <= 0) {
+          birdSpawnTimer = 90 + Math.random() * 130;
+          const fromLeft = Math.random() < 0.5;
+          const x = fromLeft ? -40 : canvas.width + 40;
+          const dir = fromLeft ? 1 : -1;
+          const y = 120 + Math.random() * 140;
+          birds.push({
+            x: x,
+            y: y,
+            dir: dir,
+            speed: 2.5 + Math.random() * 2.5,
+            flap: Math.random() * Math.PI * 2,
+            prevX: x,
+            prevY: y,
+            alive: true
+          });
+        }
+
+        // Move birds toward the man, homing in vertically.
+        for (let bird of birds) {
+          bird.x += bird.dir * bird.speed * dt;
+          const targetY = manY - 35;
+          bird.y += (targetY - bird.y) * 0.012 * dt;
+          bird.flap += 0.25 * dt;
+          if (bird.x < -40 || bird.x > canvas.width + 40) bird.alive = false;
+        }
+
+        // Move bullets.
+        for (let bullet of bullets) {
+          bullet.x += bullet.dir * 12 * dt;
+          if (bullet.x < -20 || bullet.x > canvas.width + 20) bullet.alive = false;
+        }
+
+        // Bullet vs bird collisions (simple circle distance test).
+        for (let bullet of bullets) {
+          if (!bullet.alive) continue;
+          for (let bird of birds) {
+            if (!bird.alive) continue;
+            const dx = bullet.x - bird.x;
+            const dy = bullet.y - bird.y;
+            if (dx * dx + dy * dy < 20 * 20) {
+              bullet.alive = false;
+              bird.alive = false;
+              killCount++;
+              break;
+            }
+          }
+        }
+
+        // Bird vs man collisions: each hit costs 25 health.
+        for (let bird of birds) {
+          if (!bird.alive) continue;
+          const dx = bird.x - manX;
+          const dy = bird.y - (manY - 20);
+          if (dx * dx + dy * dy < 25 * 25) {
+            bird.alive = false;
+            health -= 25;
+            damageFlash = 0.8;
+          }
+        }
+
+        // Car collision: only the very bottom of the stickman sprite (his
+        // feet) can be hit by the car. A cooldown prevents the same car
+        // from draining health every frame.
+        if (carHitCooldown <= 0) {
+          const feetLeft = manX - 12;
+          const feetRight = manX + 12;
+          const feetTop = manY + 105;
+          const feetBottom = manY + 115;
+
+          const carLeft = carX;
+          const carRight = carX + 180;
+          const carTop = carY - 45;
+          const carBottom = carY + 80; // includes the wheels
+
+          if (feetRight > carLeft && feetLeft < carRight &&
+              feetBottom > carTop && feetTop < carBottom) {
+            health -= 90;
+            carHitCooldown = 60;
+            damageFlash = 0.8;
+          }
+        }
+
+        // Game over once the man runs out of health.
+        if (health <= 0) {
+          health = 0;
+          gameOver = true;
+        }
+
+        // Remove anything that was hit or left the screen.
+        birds = birds.filter(bird => bird.alive);
+        bullets = bullets.filter(bullet => bullet.alive);
+      }
+
+      function draw(alpha) {
+        // Compute interpolated render positions. For objects that wrap
+        // (teleport) across the screen, snap to the current position on
+        // the frame a wrap occurs rather than sliding across the screen.
+        const wrapSnap = canvas.width;
+
+        const rCarX = lerpWithWrapSnap(prevCarX, carX, alpha, wrapSnap);
+        const rManX = lerpWithWrapSnap(prevManX, manX, alpha, wrapSnap);
+        const rManY = lerp(prevManY, manY, alpha);
+        const rBellX = lerpWithWrapSnap(prevBellX, bellX, alpha, wrapSnap);
+        // Trees (and other periodic scrolling backgrounds) move slowly and
+        // wrap by an exact period, so interpolation causes visible glitches
+        // at the wrap boundary. Rendering them at their post-update position
+        // is smooth enough (a ~2px step is imperceptible) and glitch-free.
+        const rTreesX = treesX;
+        const rTrees2X = trees2X;
+        const rLegSwing = lerp(prevLegSwing, legSwing, alpha);
+        const rLegSwing2 = lerp(prevLegSwing2, legSwing2, alpha);
+        const rWheelRotation = lerp(prevWheelRotation, wheelRotation, alpha);
+
+        context.clearRect(0, 0, canvas.width, canvas.height);
+        context.fillStyle = "#f7ffff";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+
+        drawBackground(rTreesX, rTrees2X, rBellX);
+        drawGround();
+        drawForeground(rCarX, rManX, rManY, rLegSwing, rLegSwing2, rWheelRotation, alpha);
+
+        // Draw the FPS counter.
+        context.fillStyle = "#000";
+        context.font = "16px sans-serif";
+        context.fillText("FPS: " + fps, 10, 20);
+        context.fillText("Kills: " + killCount, 10, 40);
+        context.fillText("Health: " + health, 10, 60);
+
+        // Red damage flash overlay (drawn on top of everything).
+        if (damageFlash > 0) {
+          context.fillStyle = "rgba(255, 0, 0, " + damageFlash + ")";
+          context.fillRect(0, 0, canvas.width, canvas.height);
+        }
+
+        // Game over screen.
+        if (gameOver) {
+          context.fillStyle = "#000";
+          context.textAlign = "center";
+          context.font = "bold 48px sans-serif";
+          context.fillText("GAME OVER", canvas.width / 2, canvas.height / 2 - 10);
+          context.font = "20px sans-serif";
+          context.fillText("Press R to restart", canvas.width / 2, canvas.height / 2 + 30);
+          context.textAlign = "left";
+        }
+
+        // Count a rendered frame.
+        ++framesThisSecond;
+      }
+
+      function drawBackground(treesX, trees2X, bellX) {
+        drawTrees2(trees2X);
+        drawSkyGradient();
+        drawBellTower(bellX);
+        drawSkyGradient();
+        drawTrees(treesX);
+        drawSkyGradient();
+      }
+
+      function drawGround() {
+        context.fillStyle = "#555555";
+        context.fillRect(0, 280, canvas.width, 120);
+        context.fillStyle = "#888888"
+        context.fillRect(0, 350, canvas.width, 50);
+      }
+
+      function drawForeground(carX, manX, manY, legSwing, legSwing2, wheelRotation, alpha) {
+        drawSkyGradient();
+        drawCar(carX, wheelRotation);
+        drawRain(alpha);
+        drawGroundGradient();
+        drawBirds(alpha);
+        drawMan(manX, manY, legSwing, legSwing2);
+        drawBullets(alpha);
+        drawGroundGradient();
+        drawCloudGradient();
+        drawSunGradient();
+      }
+      
+      function drawRain(alpha) {
+        context.save();
+
+        context.strokeStyle = "rgba(180, 220, 255, 0.65)";
+        context.lineWidth = 2;
+        context.lineCap = "round";
+
+        for (let drop of rainDrops) {
+          const x = lerp(drop.prevX, drop.x, alpha);
+          // Snap vertically if the drop just wrapped to the top.
+          const y = lerpWithWrapSnap(drop.prevY, drop.y, alpha, canvas.height);
+
+          context.beginPath();
+          context.moveTo(x, y);
+          context.lineTo(x - 3, y + drop.length);
+          context.stroke();
+        }
+
+        context.restore();
+      }
+      
+      function drawGroundGradient() {
+        context.save();
+
+        const gradient = context.createLinearGradient(0, 600, 0, 0);
+
+        gradient.addColorStop(0, "rgba(189, 231, 255, .3)");
+        gradient.addColorStop(0.5, "rgba(189, 231, 255, 0.2)");
+        gradient.addColorStop(0.6, "rgba(189, 231, 255, 0)");
+
+        context.fillStyle = gradient;
+        context.fillRect(0, 0, canvas.width, 600);
+
+        context.restore();
+      }
+      
+      
+       function drawSkyGradient() {
+        context.save();
+
+        const gradient = context.createLinearGradient(0, 280, 0, 0);
+
+        gradient.addColorStop(0, "rgba(189, 231, 255, .3)");
+        gradient.addColorStop(0.5, "rgba(189, 231, 255, 0.2)");
+        gradient.addColorStop(0.6, "rgba(189, 231, 255, 0)");
+
+        context.fillStyle = gradient;
+        context.fillRect(0, 0, canvas.width, 280);
+
+        context.restore();
+      }
+
+      
+      function drawCloudGradient() {
+        context.save();
+
+        const gradient = context.createLinearGradient(0, 0, 0, 280);
+
+        gradient.addColorStop(0, "rgba(180, 180, 180, 0.65)");
+        gradient.addColorStop(0.5, "rgba(200, 200, 200, 0.3)");
+        gradient.addColorStop(1, "rgba(255, 255, 255, 0)");
+
+        context.fillStyle = gradient;
+        context.fillRect(0, 0, canvas.width, 280);
+
+        context.restore();
+      }
+      
+      function drawSunGradient() {
+        context.save();
+
+        const sun = context.createRadialGradient(
+          800, 0, 10,
+          800, 0, 200
+        );
+
+        sun.addColorStop(0, "rgba(255, 255, 255, 1)");
+        sun.addColorStop(0.25, "rgba(255, 255, 255, 0.8)");
+        sun.addColorStop(0.65, "rgba(255, 255, 255, 0.3)");
+        sun.addColorStop(1, "rgba(255, 255, 255, 0)");
+
+        context.fillStyle = sun;
+        context.fillRect(0, 0, canvas.width, 280);
+
+        context.restore();
+      }
+
+      
+      
+      function drawTrees(treesX) {
+    context.save();
+
+    context.translate(treesX, 0);
+
+    for (let x = 80; x < canvas.width + 360; x += 180) {
+      context.save();
+      context.translate(x, 0);
+
+      context.fillStyle = "#6b3e26";
+      context.fillRect(-10, 210, 20, 70);
+
+      context.fillStyle = "#176b35";
+      context.beginPath();
+      context.arc(0, 180, 45, 0, 2 * Math.PI);
+      context.fill();
+
+      context.beginPath();
+      context.arc(-30, 205, 35, 0, 2 * Math.PI);
+      context.fill();
+
+      context.beginPath();
+      context.arc(30, 205, 35, 0, 2 * Math.PI);
+      context.fill();
+
+      context.restore();
+    }
+
+    context.restore();
+  }
+      
+      
+      function drawBellTower(bellX) {
+          context.save();
+
+          context.translate(bellX, 280);
+          context.scale(1.1, 1.1);
+
+          context.fillStyle = "#d8d1c2";
+          context.fillRect(-35, -95, 70, 95);
+
+          context.fillStyle = "#eee8dc";
+          context.fillRect(-24, -190, 48, 100);
+
+          context.strokeStyle = "#777";
+          context.lineWidth = 2;
+          context.strokeRect(-24, -190, 48, 100);
+
+          context.beginPath();
+          context.arc(0, -150, 13, Math.PI, 0);
+          context.lineTo(13, -120);
+          context.lineTo(-13, -120);
+          context.closePath();
+          context.fillStyle = "#444";
+          context.fill();
+
+          context.beginPath();
+          context.arc(0, -142, 7, 0, 2 * Math.PI);
+          context.fillStyle = "#c89b3c";
+          context.fill();
+
+          context.beginPath();
+          context.moveTo(-38, -190);
+          context.lineTo(0, -225);
+          context.lineTo(38, -190);
+          context.closePath();
+          context.fillStyle = "#6b4a32";
+          context.fill();
+
+          context.beginPath();
+          context.moveTo(0, -225);
+          context.lineTo(0, -255);
+          context.lineTo(5, -225);
+          context.closePath();
+          context.fillStyle = "#777";
+          context.fill();
+
+          context.beginPath();
+          context.arc(0, -205, 8, 0, 2 * Math.PI);
+          context.fillStyle = "white";
+          context.fill();
+          context.strokeStyle = "#444";
+          context.stroke();
+
+          context.beginPath();
+          context.moveTo(0, -205);
+          context.lineTo(0, -211);
+          context.moveTo(0, -205);
+          context.lineTo(5, -201);
+          context.stroke();
+
+          context.restore();
+        }
+      
+      function drawTrees2(trees2X) {
+      context.save();
+
+      context.translate(trees2X, 80);
+
+      for (let x = 80; x < canvas.width + 360; x += 180) {
+        context.save();
+        context.translate(x, 0);
+        context.scale(0.7, 0.7)
+
+        context.fillStyle = "#6b3e26";
+        context.fillRect(-10, 210, 20, 90);
+
+        context.fillStyle = "#176b35";
+        context.beginPath();
+        context.arc(0, 180, 45, 0, 2 * Math.PI);
+        context.fill();
+
+        context.beginPath();
+        context.arc(-30, 205, 35, 0, 2 * Math.PI);
+        context.fill();
+
+        context.beginPath();
+        context.arc(30, 205, 35, 0, 2 * Math.PI);
+        context.fill();
+
+        context.restore();
+      }
+ 
+        context.restore();
+      }
+      
+      function drawMan(manX, manY, legSwing, legSwing2) {
+    context.save();
+
+    context.translate(manX, manY);
+
+    context.fillStyle = "#000000";
+    context.fillRect(-2.5, 0, 5, 55);
+
+    context.save();
+    context.translate(0, -20);
+
+    context.beginPath();
+    context.arc(0, 0, 20, 0, 2 * Math.PI);
+    context.fillStyle = "white";
+    context.fill();
+    context.strokeStyle = "black";
+    context.lineWidth = 3;
+    context.stroke();
+
+    context.restore();
+
+    context.save();
+    context.translate(0, 55);
+
+    context.strokeStyle = "#000000";
+    context.lineWidth = 5;
+    context.lineCap = "round";
+        
+    context.save();
+    context.beginPath();
+    context.moveTo(0, -40);
+    context.lineTo(10, 0);
+    context.lineTo(20, 0);
+    context.stroke();
+    context.restore();
+    context.save();
+    context.beginPath();
+    context.moveTo(0, -40);
+    context.lineTo(-10, 0);
+    context.lineTo(-20, 0);
+    context.stroke();
+    context.restore();
+
+    context.save();
+    context.rotate(Math.cos(legSwing) * .45);
+    context.beginPath();
+    context.moveTo(0, 0);
+    context.lineTo(0, 35);
+    context.lineTo(0, 55);
+    context.lineTo(10 * manFacing, 55);
+    context.stroke();
+    context.restore();
+
+    context.save();
+    context.rotate(Math.cos(legSwing2)* .45);
+    context.beginPath();
+    context.moveTo(0, 0);
+    context.lineTo(0, 35);
+    context.lineTo(0, 55);
+    context.lineTo(10 * manFacing, 55);
+    context.stroke();
+    context.restore();
+
+    context.restore();
+    context.restore();
+  }
+      
+      
+
+      function drawBirds(alpha) {
+        for (let bird of birds) {
+          const x = lerp(bird.prevX, bird.x, alpha);
+          const y = lerp(bird.prevY, bird.y, alpha);
+          drawBird(x, y, bird.flap);
+        }
+      }
+
+      // A bird drawn with just two lines. The wing tips move up and down
+      // with the flap phase so the two lines look like a flying bird.
+      function drawBird(x, y, flap) {
+        context.save();
+
+        context.translate(x, y);
+        context.strokeStyle = "#333";
+        context.lineWidth = 3;
+        context.lineCap = "round";
+
+        const wingTipY = Math.sin(flap) * 9 + 2;
+
+        context.beginPath();
+        context.moveTo(-15, -wingTipY);
+        context.lineTo(0, 0);
+        context.stroke();
+
+        context.beginPath();
+        context.moveTo(15, -wingTipY);
+        context.lineTo(0, 0);
+        context.stroke();
+
+        context.restore();
+      }
+
+      function drawBullets(alpha) {
+        context.save();
+
+        context.fillStyle = "#000";
+        for (let bullet of bullets) {
+          const x = lerp(bullet.prevX, bullet.x, alpha);
+          const y = lerp(bullet.prevY, bullet.y, alpha);
+
+          context.beginPath();
+          context.arc(x, y, 4, 0, 2 * Math.PI);
+          context.fill();
+        }
+
+        context.restore();
+      }
+
+      function drawCar(carX, wheelRotation) {
+        context.save();
+
+        context.translate(carX, carY);
+
+        context.fillStyle = "#d62828";
+        context.fillRect(0, 0, 180, 55);
+
+        context.beginPath();
+        context.moveTo(35, 0);
+        context.lineTo(65, -45);
+        context.lineTo(130, -45);
+        context.lineTo(155, 0);
+        context.closePath();
+        context.fillStyle = "#d62828";
+        context.fill();
+
+        context.fillStyle = "#90e0ef";
+        
+        const headlightGlow = context.createLinearGradient(5, 18, -80, 18);
+        headlightGlow.addColorStop(0, "rgba(255, 255, 180, 0.95)");
+        headlightGlow.addColorStop(0.3, "rgba(255, 220, 70, 0.5)");
+        headlightGlow.addColorStop(1, "rgba(255, 210, 0, 0)");
+
+        context.fillStyle = headlightGlow;
+        context.beginPath();
+        context.moveTo(5, 13);
+        context.lineTo(-150, -15);
+        context.lineTo(-150, 72);
+        context.lineTo(5, 23);
+        context.closePath();
+        context.fill();
+
+        drawWheel(40, 55, wheelRotation);
+
+        drawWheel(140, 55, wheelRotation);
+
+        context.restore();
+      }
+      
+      
+
+      function drawWheel(x, y, wheelRotation) {
+        context.save();
+
+        context.translate(x, y);
+
+        context.rotate(wheelRotation);
+
+        context.beginPath();
+        context.arc(0, 0, 25, 0, 2 * Math.PI);
+        context.fillStyle = "#222";
+        context.fill();
+
+        context.beginPath();
+        context.arc(0, 0, 10, 0, 2 * Math.PI);
+        context.fillStyle = "#aaa";
+        context.fill();
+
+        context.strokeStyle = "white";
+        context.lineWidth = 2;
+
+        for (let i = 0; i < 4; i++) {
+          context.rotate(Math.PI / 4);
+          context.beginPath();
+          context.moveTo(-12, 0);
+          context.lineTo(12, 0);
+          context.stroke();
+        }
+
+        context.restore();
+      }
+    </script>
+  <script type="module" src="https://static.cloudflareinsights.com/beacon.min.js/v31edd6df95cf4e85bb4c19e7a9bdbcba1788362987495" integrity="sha512-iIg7k2xntmwu6/uSb5tpc/hySgZc4eoL31yB29W6tJFo2akwjPWcEqnCEdJvGexCL0KEQwVYv5BlowfhVz26hg==" data-cf-beacon='{"version":"2024.11.0","token":"480c9d8468c44ad3bed3c74fbcc6d6f3","r":1,"spa":2}' crossorigin="anonymous"></script>
+</body>
+  </html>
